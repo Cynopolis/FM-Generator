@@ -3,20 +3,8 @@
 // pin to read in analog audio signal
 #define sound_in_pin A0
 // pin to output fm audio signal
-#define FM_out_pin DAC0
+#define FM_out_pin 2
 #define sync_pin 2
-
-/**
-  * @brief set up timer 2, channel 2 as a 42 kHz triangle wave.
-  * This is used to generate the FM carrier
-*/
-void setup_timer(){
-  pmc_set_writeprotect(false); // disable write protection so we can configure the timer
-  pmc_enable_periph_clk(TC6_IRQn); // enable the clock that runs the timer
-  TC_Configure(TC2, 0, TC_CMR_WAVE | 0x00004000); //configure the counter to be in waveform mode and reset on match with the reset register
-  TC_SetRC(TC2, 0, 0xFFFFFFFF);//997); // reset the counter at this value (once every 23.7 us or 42.1 kHz)
-  TC_Start(TC2, 0); // start the timer
-}
 
 /**
  * @brief Read the given analog channel. THIS DOES NOT WORK UNLESS THE ADC CHANNEL IS INITIALIZED
@@ -34,6 +22,8 @@ uint32_t fastAnalogRead(adc_channel_num_t analogChannel){
   * @param analogChannel the analog channel to configure
 */
 void setupADC(adc_channel_num_t analogChannel){
+  
+
   // disable write protection so we can configure the ADC
   adc_set_writeprotect(ADC, 0);
   // Configure the ADC to read at 1 MHz
@@ -46,56 +36,105 @@ void setupADC(adc_channel_num_t analogChannel){
   //adc_start(ADC);
 }
 
-/**
- * @brief Set up the DAC as high speed output.
- * @param channel The channel to set up.
- */
-void setupDAC(uint32_t channel) {
 
-  // Write the value.
-  if (dacc_get_channel_status(DACC) == 0) {
-    /* Enable clock for DACC */
-    pmc_enable_periph_clk(ID_DACC);
 
-    /* Reset DACC registers */
-    dacc_reset(DACC);
+static inline uint32_t mapResolution(uint32_t value, uint32_t from, uint32_t to) {
+	if (from == to)
+		return value;
+	if (from > to)
+		return value >> (from-to);
+	else
+		return value << (to-from);
+}
 
-    /* Half word transfer mode */
-    dacc_set_transfer_mode(DACC, 0);
+static uint8_t TCChanEnabled[] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 
-    /* Power save:
-      * sleep mode  - 0 (disabled)
-      * fast wakeup - 0 (disabled)
-      */
-    dacc_set_power_save(DACC, 0, 0);
-    /* Timing:
-      * refresh        - 0x08 (1024*8 dacc clocks)
-      * max speed mode -    0 (disabled)
-      * startup time   - 0x10 (1024 dacc clocks)
-      */
-    dacc_set_timing(DACC, 0x08, 1, 0x10);
-    // Ensure the DAC has been set to free running mode
-    //DACC->DACC_MR = DACC->DACC_MR & 0xFFFFFFFE;
+static Tc *channelToTC[] = {
+			TC0, TC0, TC0, TC0, TC0, TC0,
+			TC1, TC1, TC1, TC1, TC1, TC1,
+			TC2, TC2, TC2, TC2, TC2, TC2 };
 
-    /* Set up analog current */
-    dacc_set_analog_control(DACC, DACC_ACR_IBCTLCH0(0x02) |
-                  DACC_ACR_IBCTLCH1(0x02) |
-                  DACC_ACR_IBCTLDACCORE(0x01));
-  }
+static const uint32_t channelToChNo[] = { 0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2 };
 
-  /* Disable TAG and select output channel chDACC */
-  dacc_set_channel_selection(DACC, channel);
+static void TC_SetCMR_ChannelA(Tc *tc, uint32_t chan, uint32_t v)
+{
+	tc->TC_CHANNEL[chan].TC_CMR = (tc->TC_CHANNEL[chan].TC_CMR & 0xFFF0FFFF) | v;
+}
 
-  // Enable the dac if it isn't already enabled
-  if ((dacc_get_channel_status(DACC) & (1 << channel)) == 0) {
-    dacc_enable_channel(DACC, channel);
-  }
+static void TC_SetCMR_ChannelB(Tc *tc, uint32_t chan, uint32_t v)
+{
+	tc->TC_CHANNEL[chan].TC_CMR = (tc->TC_CHANNEL[chan].TC_CMR & 0xF0FFFFFF) | v;
+}
 
-  // //return without writing anything if the DACC isn't ready
-  // if ((dacc_get_interrupt_status(DACC) & DACC_ISR_EOC) == 0){
-  //   return;
-  // }
-  return;
+void setupPWM(uint32_t ulPin){
+    uint32_t frequency = 42000;
+    // We use MCLK/2 as clock.
+		const uint32_t TC = VARIANT_MCK / 2 / frequency;
+
+		// Map value to Timer ranges 0..255 => 0..TC
+		uint32_t ulValue = 127;
+		ulValue = ulValue * TC;
+		ulValue = ulValue / TC_MAX_DUTY_CYCLE;
+
+		// Setup Timer for this pin
+		ETCChannel channel = g_APinDescription[ulPin].ulTCChannel;
+		
+		static const uint32_t channelToAB[]   = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0 };
+		uint32_t chA  = channelToAB[channel];
+		static const uint32_t channelToId[] = { 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8 };
+		uint32_t chNo = channelToChNo[channel];
+		Tc *chTC = channelToTC[channel];
+		uint32_t interfaceID = channelToId[channel];
+
+		if (!TCChanEnabled[interfaceID]) {
+			pmc_enable_periph_clk(TC_INTERFACE_ID + interfaceID);
+			TC_Configure(chTC, chNo,
+				TC_CMR_TCCLKS_TIMER_CLOCK1 |
+				TC_CMR_WAVE |         // Waveform mode
+				TC_CMR_WAVSEL_UP_RC | // Counter running up and reset when equals to RC
+				TC_CMR_EEVT_XC0 |     // Set external events from XC0 (this setup TIOB as output)
+				TC_CMR_ACPA_CLEAR | TC_CMR_ACPC_CLEAR |
+				TC_CMR_BCPB_CLEAR | TC_CMR_BCPC_CLEAR);
+			TC_SetRC(chTC, chNo, TC);
+		}
+
+    if (chA) {
+      TC_SetRA(chTC, chNo, ulValue);
+      TC_SetCMR_ChannelA(chTC, chNo, TC_CMR_ACPA_CLEAR | TC_CMR_ACPC_SET);
+    } else {
+      TC_SetRB(chTC, chNo, ulValue);
+      TC_SetCMR_ChannelB(chTC, chNo, TC_CMR_BCPB_CLEAR | TC_CMR_BCPC_SET);
+    }
+
+		if ((g_pinStatus[ulPin] & 0xF) != PIN_STATUS_PWM) {
+			PIO_Configure(g_APinDescription[ulPin].pPort,
+					g_APinDescription[ulPin].ulPinType,
+					g_APinDescription[ulPin].ulPin,
+					g_APinDescription[ulPin].ulPinConfiguration);
+			g_pinStatus[ulPin] = (g_pinStatus[ulPin] & 0xF0) | PIN_STATUS_PWM;
+		}
+		if (!TCChanEnabled[interfaceID]) {
+			TC_Start(chTC, chNo);
+			TCChanEnabled[interfaceID] = 1;
+		}
+}
+
+void setPWMFrequency(uint32_t frequency, uint32_t pwmPin) {
+  /* Configure ul_channel */
+  ETCChannel channel = g_APinDescription[pwmPin].ulTCChannel;
+  Tc *chTC = channelToTC[channel];
+  uint32_t chNo = channelToChNo[channel];
+  uint32_t TC = VARIANT_MCK / 2 / frequency;
+
+  TC_SetRC(chTC, chNo, TC);
+  TC_SetRA(chTC, chNo, 127*TC/255);
+
+  // read counter value
+  uint32_t ulValue = TC_GetCV(chTC, chNo);
+  
+  // reset the counter
+  // TC_Start(chTC, chNo);
+
 }
 
 void setup() {
@@ -104,21 +143,12 @@ void setup() {
 
   // put your setup code here, to run once:
   pinMode(sound_in_pin, INPUT);
-  pinMode(FM_out_pin, OUTPUT);
   pinMode(sync_pin, OUTPUT);
   digitalWrite(sync_pin, LOW);
 
-  // setup the DAC
-  Serial.println("Setting up DAC");
-  setupDAC(0);
-
-  // write to the DAC
-  Serial.println("Zeroing DAC");
-  dacc_write_conversion_data(DACC, 0);
-
-  // set up a timer
-  Serial.println("Setting up timer");
-  setup_timer();
+  // setup PWM
+  Serial.println("Setting up PWM");
+  setupPWM(FM_out_pin);
 
   // set up ADC channel 0
   Serial.println("Setting up ADC");
@@ -133,30 +163,20 @@ int sine_wave[997] = {2048,2060,2073,2086,2099,2112,2125,2138,2151,2164,2176,218
 
 uint32_t passed_time = 0;
 int FM_factor;
-uint32_t sig_period_us = 945; // the period of the signal in microseconds
+uint32_t sig_frequency = 42000; // the period of the signal in microseconds
 uint32_t timer = 0;
 
 void loop() {
-  // Read the message signal and map it to a value from 90 to -90 us.
-  // 90 microseconds corresponds to half of 22 kHz (an audio input signal).
-  FM_factor = fastAnalogRead(ADC_CHANNEL_0);
-  FM_factor = map(FM_factor, 0, 4095, 100, -100);
-  //modulate the carrier signal with the message signal by changing the reset value of the timer
-  // TC_SetRC(TC2, 0, 997 + FM_factor);
-  sig_period_us = 945 + FM_factor;
-
-  // read in the current timer value
-  // timer_val = TC_ReadCV(TC2, 0);
-  passed_time += TC_ReadCV(TC2, 0) - timer;
-  timer = TC_ReadCV(TC2, 0);
-  while(passed_time > sig_period_us) {
-    passed_time -= sig_period_us;
+  while(true){
+    // Read the message signal and map it to a value from 90 to -90 us.
+    // 90 microseconds corresponds to half of 22 kHz (an audio input signal).
+    FM_factor = fastAnalogRead(ADC_CHANNEL_0);
+    FM_factor = map(FM_factor, 0, 4095, 1000, -1000);
+    //modulate the carrier signal with the message signal by changing the reset value of the timer
+    // TC_SetRC(TC2, 0, 997 + FM_factor);
+    sig_frequency = 42000 + FM_factor;
+    setPWMFrequency(sig_frequency, FM_out_pin);
   }
   
-  // map the timer value to a value from 0-997
-  int phase = map(passed_time, 0, 997 + FM_factor, 0, 997);
-
-  // write the FM signal to the DAC
-  dacc_write_conversion_data(DACC, sine_wave[phase]);
 
 }
