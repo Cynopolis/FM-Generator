@@ -129,11 +129,11 @@ void setPWMFrequency(uint32_t frequency, uint32_t pwmPin) {
   TC_SetRC(chTC, chNo, TC);
   TC_SetRA(chTC, chNo, 127*TC/255);
 
-  // read counter value
-  uint32_t ulValue = TC_GetCV(chTC, chNo);
-  
-  // reset the counter
-  // TC_Start(chTC, chNo);
+  // if the current reset value is less than the current counter value...
+  if(TC < TC_ReadCV(chTC, chNo)){
+    // counter overflowed, so reset it
+    TC_Start(chTC, chNo);
+  }
 
 }
 
@@ -171,7 +171,7 @@ void loop() {
     // Read the message signal and map it to a value from 90 to -90 us.
     // 90 microseconds corresponds to half of 22 kHz (an audio input signal).
     FM_factor = fastAnalogRead(ADC_CHANNEL_0);
-    FM_factor = map(FM_factor, 0, 4095, 1000, -1000);
+    FM_factor = map(FM_factor, 0, 4095, 10000, -10000);
     //modulate the carrier signal with the message signal by changing the reset value of the timer
     // TC_SetRC(TC2, 0, 997 + FM_factor);
     sig_frequency = 42000 + FM_factor;
