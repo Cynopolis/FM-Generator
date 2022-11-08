@@ -3,8 +3,8 @@
 // pin to read in analog audio signal
 #define sound_in_pin A0
 // pin to output fm audio signal
-#define FM_out_pin 2
-#define sync_pin 2
+#define FM_out_pin1 2
+#define FM_out_pin2 3
 
 /**
  * @brief Read the given analog channel. THIS DOES NOT WORK UNLESS THE ADC CHANNEL IS INITIALIZED
@@ -143,12 +143,10 @@ void setup() {
 
   // put your setup code here, to run once:
   pinMode(sound_in_pin, INPUT);
-  pinMode(sync_pin, OUTPUT);
-  digitalWrite(sync_pin, LOW);
 
   // setup PWM
   Serial.println("Setting up PWM");
-  setupPWM(FM_out_pin);
+  setupPWM(FM_out_pin1);
 
   // set up ADC channel 0
   Serial.println("Setting up ADC");
@@ -163,7 +161,7 @@ int sine_wave[997] = {2048,2060,2073,2086,2099,2112,2125,2138,2151,2164,2176,218
 
 uint32_t passed_time = 0;
 int FM_factor;
-uint32_t sig_frequency = 42000; // the period of the signal in microseconds
+uint32_t sig_frequency = 30000; // the period of the signal in microseconds
 uint32_t timer = 0;
 
 void loop() {
@@ -174,9 +172,7 @@ void loop() {
     FM_factor = map(FM_factor, 0, 4095, 10000, -10000);
     //modulate the carrier signal with the message signal by changing the reset value of the timer
     // TC_SetRC(TC2, 0, 997 + FM_factor);
-    sig_frequency = 42000 + FM_factor;
-    setPWMFrequency(sig_frequency, FM_out_pin);
+    sig_frequency = 40000 + FM_factor;
+    setPWMFrequency(sig_frequency, FM_out_pin1);
   }
-  
-
 }
